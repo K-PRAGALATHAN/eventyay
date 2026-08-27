@@ -296,6 +296,17 @@ class EnhancedSelectMultiple(EnhancedSelectMixin, SelectMultiple):
     pass
 
 
+class CountableOption:
+    """A choice label that carries how many objects it matches."""
+
+    def __init__(self, name, count):
+        self.name = name
+        self.count = count
+
+    def __str__(self):
+        return str(self.name)
+
+
 def get_count(value, label):
     count = None
     instance = getattr(value, 'instance', None)

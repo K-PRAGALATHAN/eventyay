@@ -176,6 +176,29 @@ class SplitDateTimePickerWidget(forms.SplitDateTimeWidget):
         forms.MultiWidget.__init__(self, widgets, attrs)
 
 
+class HtmlSplitDateTimePickerWidget(SplitDateTimePickerWidget):
+    """Split date/time widget backed by the browser's native controls.
+
+    Drops the JS date picker, and with it the sample date it puts in the
+    placeholder, which reads as a value that is already set.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        date_attrs = self.widgets[0].attrs.copy()
+        time_attrs = self.widgets[1].attrs.copy()
+        date_attrs['class'] = ' '.join(c for c in date_attrs.get('class', '').split() if c != 'datepickerfield')
+        time_attrs['class'] = ' '.join(c for c in time_attrs.get('class', '').split() if c != 'timepickerfield')
+        date_attrs['type'] = 'date'
+        time_attrs['type'] = 'time'
+        date_attrs.pop('placeholder', None)
+        time_attrs.pop('placeholder', None)
+        self.widgets = (
+            forms.DateInput(attrs=date_attrs, format='%Y-%m-%d'),
+            forms.TimeInput(attrs=time_attrs, format='%H:%M:%S'),
+        )
+
+
 class BusinessBooleanRadio(forms.RadioSelect):
     def __init__(self, require_business=False, attrs=None):
         self.require_business = require_business

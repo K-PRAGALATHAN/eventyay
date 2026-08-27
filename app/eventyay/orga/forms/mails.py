@@ -12,7 +12,7 @@ from django.utils.html import escape
 from django.utils.translation import gettext_lazy as _
 from i18nfield.forms import I18nModelForm
 
-from eventyay.base.forms.widgets import SplitDateTimePickerWidget
+from eventyay.base.forms.widgets import HtmlSplitDateTimePickerWidget
 from eventyay.base.models import MailTemplate, QueuedMail, Track, User
 from eventyay.base.models.submission import Submission, SubmissionStates
 from eventyay.common.exceptions import SendMailException
@@ -27,21 +27,11 @@ from eventyay.mail.context import get_available_placeholders, get_invalid_placeh
 from eventyay.submission.forms import SubmissionFilterForm
 
 
-class TalkSplitDateTimePickerWidget(SplitDateTimePickerWidget):
-    """Talk-specific widget that uses native HTML5 date and time inputs."""
+class TalkSplitDateTimePickerWidget(HtmlSplitDateTimePickerWidget):
+    """Native HTML5 date and time inputs.
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        date_attrs = self.widgets[0].attrs.copy()
-        time_attrs = self.widgets[1].attrs.copy()
-        date_attrs['class'] = ' '.join(c for c in date_attrs.get('class', '').split() if c != 'datepickerfield')
-        time_attrs['class'] = ' '.join(c for c in time_attrs.get('class', '').split() if c != 'timepickerfield')
-        date_attrs['type'] = 'date'
-        time_attrs['type'] = 'time'
-        self.widgets = (
-            forms.DateInput(attrs=date_attrs, format='%Y-%m-%d'),
-            forms.TimeInput(attrs=time_attrs, format='%H:%M:%S'),
-        )
+    Kept as an alias so the ticket composer can share the same widget.
+    """
 
 
 class MailTemplateForm(ReadOnlyFlag, I18nHelpText, I18nModelForm):

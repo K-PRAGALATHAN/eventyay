@@ -21,6 +21,7 @@ from eventyay.common.forms.fields import ImageField
 from eventyay.common.forms.mixins import ConfiguredFieldOrderMixin, PublicContent, QuestionFieldsMixin, RequestRequire
 from eventyay.common.forms.renderers import InlineFormRenderer
 from eventyay.common.forms.widgets import (
+    CountableOption,
     EnhancedSelect,
     MarkdownWidget,
     SearchInput,
@@ -426,15 +427,6 @@ class InfoForm(
             'submission_type': EventLocalizedSafeModelChoiceField,
             'track': EventLocalizedSafeModelChoiceField,
         }
-
-
-class CountableOption:
-    def __init__(self, name, count):
-        self.name = name
-        self.count = count
-
-    def __str__(self):
-        return str(self.name)
 
 
 class SubmissionFilterForm(forms.Form):

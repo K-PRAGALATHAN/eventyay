@@ -2,7 +2,9 @@ from django import forms
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.core.validators import validate_email
+from django.db.models import Count, Q
 from django.urls import reverse
+from django.utils.timezone import now
 from django.utils.translation import gettext_lazy as _
 from django.utils.translation import pgettext_lazy
 from django_scopes.forms import SafeModelMultipleChoiceField
@@ -12,8 +14,12 @@ from eventyay.base.channels import get_all_sales_channels
 from eventyay.base.email import get_available_placeholders
 from eventyay.base.forms import PlaceholderValidator, SettingsForm
 from eventyay.common.forms.fields import I18nEmailBodyFormField
-from eventyay.common.forms.widgets import I18nEmailEditorWidget
-from eventyay.base.forms.widgets import SplitDateTimePickerWidget
+from eventyay.common.forms.widgets import (
+    CountableOption,
+    I18nEmailEditorWidget,
+    SelectMultipleWithCount,
+)
+from eventyay.base.forms.widgets import HtmlSplitDateTimePickerWidget
 from eventyay.base.meetup import is_meetup_event
 from eventyay.control.forms import SplitDateTimeField
 from eventyay.base.models.base import CachedFile
@@ -97,7 +103,7 @@ class MailForm(ScheduledAtValidationMixin, forms.Form):
         max_size=settings.MAX_SIZE_CONFIG[SizeKey.UPLOAD_SIZE_OTHER],
     )  # TODO i18n
     products = forms.ModelMultipleChoiceField(
-        widget=forms.CheckboxSelectMultiple(attrs={'class': 'scrolling-multiple-choice'}),
+        widget=SelectMultipleWithCount(attrs={'title': _('Products')}),
         label=_('Only send to people who bought'),
         required=True,
         queryset=Product.objects.none(),
@@ -114,27 +120,27 @@ class MailForm(ScheduledAtValidationMixin, forms.Form):
         empty_label=pgettext_lazy('subevent', 'All dates'),
     )
     subevents_from = forms.SplitDateTimeField(
-        widget=SplitDateTimePickerWidget(),
+        widget=HtmlSplitDateTimePickerWidget(),
         label=pgettext_lazy('subevent', 'Only send to customers of dates starting at or after'),
         required=False,
     )
     subevents_to = forms.SplitDateTimeField(
-        widget=SplitDateTimePickerWidget(),
+        widget=HtmlSplitDateTimePickerWidget(),
         label=pgettext_lazy('subevent', 'Only send to customers of dates starting before'),
         required=False,
     )
     order_created_from = forms.SplitDateTimeField(
-        widget=SplitDateTimePickerWidget(),
+        widget=HtmlSplitDateTimePickerWidget(),
         label=pgettext_lazy('subevent', 'Only send to customers with orders created after'),
         required=False,
     )
     order_created_to = forms.SplitDateTimeField(
-        widget=SplitDateTimePickerWidget(),
+        widget=HtmlSplitDateTimePickerWidget(),
         label=pgettext_lazy('subevent', 'Only send to customers with orders created before'),
         required=False,
     )
     scheduled_at = SplitDateTimeField(
-        widget=SplitDateTimePickerWidget(),
+        widget=HtmlSplitDateTimePickerWidget(),
         label=_('Send at'),
         required=False,
     )
@@ -171,6 +177,26 @@ class MailForm(ScheduledAtValidationMixin, forms.Form):
             )
         return d
 
+    def _get_order_status_counts(self):
+        """How many orders sit behind each status option.
+
+        The dropdown shows these counts and hides options nothing matches, the
+        same way the Talks message center presents its filters.
+        """
+        orders = Order.objects.filter(event=self.event)
+        counts = {
+            status: count
+            for status, count in orders.values_list('status').annotate(Count('status')).order_by()
+        }
+        counts.update(
+            orders.aggregate(
+                pa=Count('pk', filter=Q(status=Order.STATUS_PENDING, require_approval=True)),
+                na=Count('pk', filter=Q(status=Order.STATUS_PENDING, require_approval=False)),
+                overdue=Count('pk', filter=Q(status=Order.STATUS_PENDING, expires__lt=now())),
+            )
+        )
+        return counts
+
     def clean_bcc(self):
         raw = self.cleaned_data.get('bcc', '') or ''
         emails = [e.strip() for e in raw.split(',') if e.strip()]
@@ -200,16 +226,6 @@ class MailForm(ScheduledAtValidationMixin, forms.Form):
         self.fields['scheduled_at'].help_text = _('Times are in the event timezone ({timezone}).').format(
             timezone=event.timezone
         )
-        # Drop the widgets' sample dates: an empty field showing "2000-12-31"
-        # reads as a default that is already set.
-        for name in ('scheduled_at', 'order_created_from', 'order_created_to',
-                     'subevents_from', 'subevents_to'):
-            field = self.fields.get(name)
-            if not field:
-                continue
-            for widget in getattr(field.widget, 'widgets', []):
-                widget.attrs.pop('placeholder', None)
-
         recp_choices = [('orders', _('Everyone who created a ticket order'))]
         if event.settings.attendee_emails_asked:
             recp_choices += [
@@ -246,10 +262,14 @@ class MailForm(ScheduledAtValidationMixin, forms.Form):
         choices.insert(0, ('pa', _('approval pending')))
         if not event.settings.get('payment_term_expire_automatically', as_type=bool):
             choices.append(('overdue', _('pending with payment overdue')))
+        status_counts = self._get_order_status_counts()
         self.fields['order_status'] = forms.MultipleChoiceField(
             label=_('Send to customers with order status'),
-            widget=forms.CheckboxSelectMultiple(attrs={'class': 'scrolling-multiple-choice'}),
-            choices=choices,
+            widget=SelectMultipleWithCount(attrs={'title': _('Order status')}),
+            choices=[
+                (value, CountableOption(label, status_counts.get(value, 0)))
+                for value, label in choices
+            ],
         )
         if not self.initial.get('order_status'):
             self.initial['order_status'] = ['p', 'na']
@@ -257,7 +277,9 @@ class MailForm(ScheduledAtValidationMixin, forms.Form):
             self.initial['order_status'].append('pa')
             self.initial['order_status'].append('na')
 
-        self.fields['products'].queryset = event.products.all()
+        self.fields['products'].queryset = event.products.annotate(
+            count=Count('orderposition', filter=Q(orderposition__canceled=False), distinct=True)
+        ).order_by('-count')
         if not self.initial.get('products'):
             self.initial['products'] = event.products.all()
 
@@ -589,7 +611,7 @@ class EmailQueueEditForm(ScheduledAtValidationMixin, forms.ModelForm):
         widgets = {
             'reply_to': forms.TextInput(attrs={'class': 'form-control'}),
             'bcc': forms.Textarea(attrs={'class': 'form-control', 'rows': 1}),
-            'scheduled_at': SplitDateTimePickerWidget(),
+            'scheduled_at': HtmlSplitDateTimePickerWidget(),
         }
 
     def __init__(self, *args, **kwargs):
@@ -738,7 +760,7 @@ class TeamMailForm(ScheduledAtValidationMixin, forms.Form):
             label=_("Send to members of these teams")
         )
         self.fields['scheduled_at'] = SplitDateTimeField(
-            widget=SplitDateTimePickerWidget(),
+            widget=HtmlSplitDateTimePickerWidget(),
             label=_('Send later'),
             required=False,
             help_text=_('Leave empty to send immediately. If set, the email will be sent at this time. Time is interpreted in the event timezone.'),

@@ -170,6 +170,27 @@ function buildChips() {
 
   const boxesByName = new Map()
   audienceFields().forEach((field) => {
+    if (field.tagName === 'SELECT') {
+      const selected = Array.from(field.selectedOptions).filter((option) => option.value)
+      if (!selected.length) {
+        return
+      }
+      // A whole dropdown selected reads better as one chip than as twenty.
+      if (field.multiple && selected.length === field.options.length && field.options.length > 1) {
+        addChip(container, fieldLabel(field), () => {
+          selected.forEach((option) => {
+            option.selected = false
+          })
+        })
+        return
+      }
+      selected.forEach((option) => {
+        addChip(container, option.textContent.trim(), () => {
+          option.selected = false
+        })
+      })
+      return
+    }
     if (field.type === 'checkbox' && field.name !== 'has_filter_checkins') {
       if (!boxesByName.has(field.name)) {
         boxesByName.set(field.name, [])
