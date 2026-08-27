@@ -25,6 +25,7 @@ from eventyay.base.models.orders import InvoiceAddress
 from eventyay.base.templatetags.rich_text import (
     build_email_preview_context,
     compile_email_body,
+    is_placeholder_html_sample,
 )
 from eventyay.base.services.mail import (
     SendMailException,
@@ -225,6 +226,9 @@ class SenderView(EventPermissionRequiredMixin, AudienceFilterMixin, CopyDraftMix
             })
         return groups
 
+    #: Longest sample shown next to a placeholder before it is trimmed.
+    sample_length = 80
+
     def describe_placeholder(self, name, placeholder):
         try:
             sample = str(placeholder.render_sample(self.request.event))
@@ -232,6 +236,14 @@ class SenderView(EventPermissionRequiredMixin, AudienceFilterMixin, CopyDraftMix
             # A placeholder without a usable sample is still insertable.
             logger.debug('No sample available for placeholder %s', name, exc_info=True)
             sample = ''
+
+        # Samples such as {order_qr} are whole HTML tags carrying a base64
+        # image; showing that markup would bury the drawer in noise.
+        if is_placeholder_html_sample(sample):
+            sample = ''
+        elif len(sample) > self.sample_length:
+            sample = sample[: self.sample_length - 1] + '…'
+
         return {'name': name, 'token': '{' + name + '}', 'sample': sample}
 
 

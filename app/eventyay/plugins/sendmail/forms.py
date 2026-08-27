@@ -196,13 +196,19 @@ class MailForm(ScheduledAtValidationMixin, forms.Form):
         event = self.event = kwargs.pop('event')
         super().__init__(*args, **kwargs)
 
-        # Spell the timezone out instead of leaving organisers to guess it, and
-        # drop the widget's sample date so it cannot be mistaken for a default.
+        # Spell the timezone out instead of leaving organisers to guess it.
         self.fields['scheduled_at'].help_text = _('Times are in the event timezone ({timezone}).').format(
             timezone=event.timezone
         )
-        for widget in getattr(self.fields['scheduled_at'].widget, 'widgets', []):
-            widget.attrs.pop('placeholder', None)
+        # Drop the widgets' sample dates: an empty field showing "2000-12-31"
+        # reads as a default that is already set.
+        for name in ('scheduled_at', 'order_created_from', 'order_created_to',
+                     'subevents_from', 'subevents_to'):
+            field = self.fields.get(name)
+            if not field:
+                continue
+            for widget in getattr(field.widget, 'widgets', []):
+                widget.attrs.pop('placeholder', None)
 
         recp_choices = [('orders', _('Everyone who created a ticket order'))]
         if event.settings.attendee_emails_asked:
