@@ -625,7 +625,7 @@ class DeleteEmailQueueView(EventPermissionRequiredMixin, TemplateView):
         )
 
     def question(self):
-        return _("Do you really want to delete this mail?")
+        return _('Do you really want to delete this mail?')
 
     def post(self, request, *args, **kwargs):
         mail = self.mail
