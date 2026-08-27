@@ -4,34 +4,49 @@ import nh3
 import uuid
 from django.conf import settings
 from django.contrib import messages
+from django.core.exceptions import ValidationError
+from django.core.validators import validate_email
 from django.db import transaction
-from django.db.models import Exists, OuterRef, Q, Subquery
-from django.http import HttpResponseRedirect
+from django.db.models import OuterRef, Subquery
+from django.http import HttpResponseRedirect, JsonResponse
 from django.shortcuts import get_object_or_404, redirect
 from django.urls import reverse
 from django.utils.functional import cached_property
-from django.utils.timezone import now
 from django.utils.translation import gettext_lazy as _
 from django.utils.translation import ngettext_lazy
 from django.views.generic import FormView, ListView, TemplateView, UpdateView, View
 
+from eventyay.base.email import get_available_placeholders
 from eventyay.base.i18n import language
 from eventyay.base.meetup import is_meetup_event
 from eventyay.base.models.base import CachedFile
 from eventyay.base.models.event import Event
-from eventyay.base.models.orders import Order, OrderPosition
+from eventyay.base.models.orders import InvoiceAddress
 from eventyay.base.templatetags.rich_text import (
     build_email_preview_context,
     compile_email_body,
 )
-from eventyay.base.services.mail import expand_email_variable_chips
+from eventyay.base.services.mail import (
+    SendMailException,
+    TolerantDict,
+    expand_email_variable_chips,
+)
+# Aliased: ``mail`` is used as a loop variable by the outbox and sent-mail views.
+from eventyay.base.services.mail import mail as send_single_email
 from eventyay.common.mail import get_reply_to_address
 from eventyay.control.permissions import EventPermissionRequiredMixin
 from eventyay.control.views.event import EventSettingsFormView, EventSettingsViewMixin
-from eventyay.helpers.timezone import attach_timezone_to_naive_clock_time, get_browser_timezone, format_scheduled_datetime
+from eventyay.helpers.timezone import format_scheduled_datetime
 from eventyay.plugins.sendmail.forms import EmailQueueEditForm
-from eventyay.plugins.sendmail.mixins import CopyDraftMixin, QueryFilterOrderingMixin
-from eventyay.plugins.sendmail.models import ComposingFor, EmailQueue, EmailQueueFilter, EmailQueueToUser
+from eventyay.plugins.sendmail.mixins import AudienceFilterMixin, CopyDraftMixin, QueryFilterOrderingMixin
+from eventyay.plugins.sendmail.models import (
+    ComposingFor,
+    EmailQueue,
+    EmailQueueFilter,
+    EmailQueueToUser,
+    RecipientRole,
+    resolve_recipients,
+)
 from eventyay.plugins.sendmail.tasks import send_queued_mail
 
 from . import forms
@@ -39,6 +54,24 @@ from .forms import MailContentSettingsForm, TeamMailForm
 
 
 logger = logging.getLogger(__name__)
+
+
+#: Placeholder categories offered by the composer's "Insert placeholder" drawer.
+#: Anything an event exposes beyond these lands in a trailing "Other" group.
+PLACEHOLDER_GROUPS = (
+    (_('Recipient'), (
+        'name', 'name_given_name', 'name_family_name', 'first_name', 'last_name',
+        'email', 'attendee_name',
+    )),
+    (_('Order'), (
+        'code', 'order_code', 'order_qr', 'order_status', 'order_created_at', 'total',
+        'total_with_currency', 'url', 'url_cancel', 'url_info_change', 'url_products_change',
+        'expire_date',
+    )),
+    (_('Ticket'), ('ticket_name', 'ticket_qr', 'download_tickets_pdf', 'check_in_status')),
+    (_('Event'), ('event', 'event_name', 'event_slug', 'event_dates', 'join_online_event')),
+    (_('Invoice and payment'), ('invoice_company', 'invoice_name', 'currency', 'payment_status')),
+)
 
 
 class BulkReplyToMixin:
@@ -56,7 +89,7 @@ class ComposeMailChoice(EventPermissionRequiredMixin, TemplateView):
     template_name = 'pretixplugins/sendmail/compose_choice.html'
 
 
-class SenderView(EventPermissionRequiredMixin, CopyDraftMixin, BulkReplyToMixin, FormView):
+class SenderView(EventPermissionRequiredMixin, AudienceFilterMixin, CopyDraftMixin, BulkReplyToMixin, FormView):
     template_name = 'pretixplugins/sendmail/send_form.html'
     permission = 'can_change_orders'
     form_class = forms.MailForm
@@ -72,57 +105,7 @@ class SenderView(EventPermissionRequiredMixin, CopyDraftMixin, BulkReplyToMixin,
         return super().form_invalid(form)
 
     def form_valid(self, form):
-        qs = Order.objects.filter(event=self.request.event)
-        statusq = Q(status__in=form.cleaned_data['order_status'])
-        if 'overdue' in form.cleaned_data['order_status']:
-            statusq |= Q(status=Order.STATUS_PENDING, expires__lt=now())
-        if 'pa' in form.cleaned_data['order_status']:
-            statusq |= Q(status=Order.STATUS_PENDING, require_approval=True)
-        if 'na' in form.cleaned_data['order_status']:
-            statusq |= Q(status=Order.STATUS_PENDING, require_approval=False)
-        orders = qs.filter(statusq)
-
-        opq = OrderPosition.objects.filter(
-            order=OuterRef('pk'),
-            canceled=False,
-            product_id__in=[p.pk for p in form.cleaned_data.get('products')],
-        )
-
-        if form.cleaned_data.get('has_filter_checkins'):
-            ql = []
-            if form.cleaned_data.get('not_checked_in'):
-                ql.append(Q(checkins__list_id=None))
-            if form.cleaned_data.get('checkin_lists'):
-                ql.append(
-                    Q(
-                        checkins__list_id__in=[i.pk for i in form.cleaned_data.get('checkin_lists', [])],
-                    )
-                )
-            if len(ql) == 2:
-                opq = opq.filter(ql[0] | ql[1])
-            elif ql:
-                opq = opq.filter(ql[0])
-            else:
-                opq = opq.none()
-
-        if form.cleaned_data.get('subevent'):
-            opq = opq.filter(subevent=form.cleaned_data.get('subevent'))
-        if form.cleaned_data.get('subevents_from'):
-            opq = opq.filter(subevent__date_from__gte=form.cleaned_data.get('subevents_from'))
-        if form.cleaned_data.get('subevents_to'):
-            opq = opq.filter(subevent__date_from__lt=form.cleaned_data.get('subevents_to'))
-        if form.cleaned_data.get('order_created_from') or form.cleaned_data.get('order_created_to'):
-            browser_tz = get_browser_timezone(form.cleaned_data.get('browser_timezone'))
-
-            def attach_timezone(dt_value):
-                return attach_timezone_to_naive_clock_time(dt_value, browser_tz)
-
-            if form.cleaned_data.get('order_created_from'):
-                opq = opq.filter(order__datetime__gte=attach_timezone(form.cleaned_data['order_created_from']))
-            if form.cleaned_data.get('order_created_to'):
-                opq = opq.filter(order__datetime__lt=attach_timezone(form.cleaned_data['order_created_to']))
-
-        orders = orders.annotate(match_pos=Exists(opq)).filter(match_pos=True).distinct()
+        orders = self.get_matching_orders(form.cleaned_data)
 
         if not orders:
             messages.error(self.request, _('There are no orders matching this selection.'))
@@ -150,7 +133,9 @@ class SenderView(EventPermissionRequiredMixin, CopyDraftMixin, BulkReplyToMixin,
 
             return self.get(self.request, *self.args, **self.kwargs)
 
-        scheduled_at = form.cleaned_data.get('scheduled_at')
+        is_draft = self.request.POST.get('action') == 'draft'
+        # A draft is never scheduled: it waits in the outbox until it is sent.
+        scheduled_at = None if is_draft else form.cleaned_data.get('scheduled_at')
         qm = EmailQueue.objects.create(
             event=self.request.event,
             user=self.request.user,
@@ -158,10 +143,11 @@ class SenderView(EventPermissionRequiredMixin, CopyDraftMixin, BulkReplyToMixin,
             message=form.cleaned_data['message'].data,
             attachments=[form.cleaned_data['attachment'].id] if form.cleaned_data.get('attachment') else [],
             locale=self.request.event.settings.locale,
-            reply_to=self._get_reply_to_for_bulk_email() or '',
-            bcc=self.request.event.settings.get('mail_bcc'),
+            reply_to=form.cleaned_data.get('reply_to') or self._get_reply_to_for_bulk_email() or '',
+            bcc=form.cleaned_data.get('bcc') or self.request.event.settings.get('mail_bcc'),
             composing_for=ComposingFor.ATTENDEES,
             scheduled_at=scheduled_at,
+            is_draft=is_draft,
         )
 
         EmailQueueFilter.objects.create(
@@ -182,7 +168,12 @@ class SenderView(EventPermissionRequiredMixin, CopyDraftMixin, BulkReplyToMixin,
 
         qm.populate_to_users()
 
-        if scheduled_at:
+        if is_draft:
+            messages.success(
+                self.request,
+                _('Your draft has been saved. You can find it in the outbox.')
+            )
+        elif scheduled_at:
             send_queued_mail.apply_async(args=[self.request.event.pk, qm.pk], eta=scheduled_at)
             self.request.event.log_action(
                 'eventyay.sendmail.scheduled',
@@ -211,7 +202,202 @@ class SenderView(EventPermissionRequiredMixin, CopyDraftMixin, BulkReplyToMixin,
     def get_context_data(self, *args, **kwargs):
         ctx = super().get_context_data(*args, **kwargs)
         ctx['output'] = getattr(self, 'output', None)
+        ctx['placeholder_groups'] = self.get_placeholder_groups()
         return ctx
+
+    def get_placeholder_groups(self):
+        """Group the available placeholders for the "Insert placeholder" drawer."""
+        available = get_available_placeholders(self.request.event, ['event', 'order', 'position_or_address'])
+
+        groups = []
+        grouped_names = set()
+        for label, names in PLACEHOLDER_GROUPS:
+            items = [self.describe_placeholder(n, available[n]) for n in names if n in available]
+            grouped_names.update(n for n in names if n in available)
+            if items:
+                groups.append({'label': label, 'items': items})
+
+        remaining = sorted(set(available) - grouped_names)
+        if remaining:
+            groups.append({
+                'label': _('Other'),
+                'items': [self.describe_placeholder(n, available[n]) for n in remaining],
+            })
+        return groups
+
+    def describe_placeholder(self, name, placeholder):
+        try:
+            sample = str(placeholder.render_sample(self.request.event))
+        except Exception:
+            # A placeholder without a usable sample is still insertable.
+            logger.debug('No sample available for placeholder %s', name, exc_info=True)
+            sample = ''
+        return {'name': name, 'token': '{' + name + '}', 'sample': sample}
+
+
+class RecipientListView(EventPermissionRequiredMixin, AudienceFilterMixin, View):
+    """JSON endpoint behind the live recipient count and the recipient preview.
+
+    It runs the audience filters through the same code path as the actual send,
+    so the number an organiser sees is the number of emails they will queue.
+    """
+
+    permission = 'can_change_orders'
+    preview_limit = 100
+
+    role_labels = {
+        RecipientRole.ATTENDEE: _('Attendee'),
+        RecipientRole.ATTENDEE_FALLBACK: _('Attendee (order contact)'),
+        RecipientRole.BUYER: _('Ticket buyer'),
+    }
+
+    def post(self, request, *args, **kwargs):
+        form = forms.RecipientQueryForm(data=request.POST, event=request.event)
+        if not form.is_valid():
+            return JsonResponse({'valid': False, 'count': 0, 'errors': form.errors.get_json_data()})
+
+        orders = list(
+            self.get_matching_orders(form.cleaned_data)
+            .prefetch_related('positions__product', 'positions__checkins')
+        )
+        recipients = resolve_recipients(orders, form.cleaned_data.get('recipients') or 'orders')
+
+        payload = {'valid': True, 'count': len(recipients)}
+        if request.POST.get('preview'):
+            payload['recipients'] = self.build_rows(recipients, orders)
+            payload['limit'] = self.preview_limit
+            payload['truncated'] = len(recipients) > self.preview_limit
+        return JsonResponse(payload)
+
+    def build_rows(self, recipients, orders):
+        orders_by_pk = {o.pk: o for o in orders}
+        positions_by_pk = {p.pk: p for o in orders for p in o.positions.all()}
+
+        rows = []
+        for email in sorted(recipients)[: self.preview_limit]:
+            data = recipients[email]
+            recipient_orders = [orders_by_pk[pk] for pk in sorted(data['orders']) if pk in orders_by_pk]
+            positions = [positions_by_pk[pk] for pk in sorted(data['positions']) if pk in positions_by_pk]
+            roles = data['roles']
+
+            rows.append({
+                'name': self.get_display_name(email, positions, recipient_orders),
+                'email': email,
+                'type': ', '.join(str(self.role_labels[r]) for r in sorted(roles) if r in self.role_labels),
+                'order_codes': [o.code for o in recipient_orders],
+                'order_status': (
+                    str(recipient_orders[0].get_status_display()) if recipient_orders else ''
+                ),
+                'products': sorted({str(p.product) for p in positions if p.product_id}),
+                'checked_in': any(p.checkins.all() for p in positions),
+                'reason': str(self.get_reason(roles)),
+            })
+        return rows
+
+    @staticmethod
+    def get_display_name(email, positions, orders):
+        for position in positions:
+            if position.attendee_email and position.attendee_email.strip().lower() == email:
+                if position.attendee_name:
+                    return str(position.attendee_name)
+        for order in orders:
+            try:
+                if order.invoice_address.name:
+                    return str(order.invoice_address.name)
+            except InvoiceAddress.DoesNotExist:
+                continue
+        return ''
+
+    @staticmethod
+    def get_reason(roles):
+        if RecipientRole.BUYER in roles and (
+            RecipientRole.ATTENDEE in roles or RecipientRole.ATTENDEE_FALLBACK in roles
+        ):
+            return _('Both ticket buyer and attendee — receives a single email.')
+        if RecipientRole.ATTENDEE in roles:
+            return _('Attendee address on a matching ticket.')
+        if RecipientRole.ATTENDEE_FALLBACK in roles:
+            return _('Order contact used because no attendee address is set.')
+        return _('Order contact address of a matching order.')
+
+
+class TestEmailView(EventPermissionRequiredMixin, BulkReplyToMixin, View):
+    """Sends the email being composed to a single address using sample data.
+
+    The test recipient never joins the campaign: nothing is queued, so it is not
+    counted and cannot be sent to the real audience by accident.
+    """
+
+    permission = 'can_change_orders'
+
+    @staticmethod
+    def build_sample_context(event):
+        """Plain sample values for the placeholders of a test email.
+
+        ``build_email_preview_context`` wraps every sample in an HTML chip so it
+        stands out on screen. A real email needs the bare values instead.
+        """
+        context = TolerantDict()
+        for key, placeholder in get_available_placeholders(
+            event, ['event', 'order', 'position_or_address']
+        ).items():
+            try:
+                context[key] = str(placeholder.render_sample(event))
+            except Exception:
+                logger.debug('No sample available for placeholder %s', key, exc_info=True)
+                context[key] = ''
+        return context
+
+    def post(self, request, *args, **kwargs):
+        address = (request.POST.get('test_email') or '').strip()
+        try:
+            validate_email(address)
+        except ValidationError:
+            return JsonResponse(
+                {'sent': False, 'error': str(_('Please enter a valid email address.'))},
+                status=400,
+            )
+
+        form = forms.MailForm(data=request.POST, event=request.event)
+        if not form.is_valid():
+            return JsonResponse(
+                {
+                    'sent': False,
+                    'error': str(_('Please fill in the subject and message first.')),
+                    'errors': form.errors.get_json_data(),
+                },
+                status=400,
+            )
+
+        event = request.event
+        locale = event.settings.locale
+        with language(locale, event.settings.region):
+            context_dict = self.build_sample_context(event)
+            try:
+                send_single_email(
+                    email=address,
+                    subject=form.cleaned_data['subject'],
+                    template=form.cleaned_data['message'],
+                    context=dict(context_dict),
+                    event=event,
+                    locale=locale,
+                    sender=event.settings.get('mail_from'),
+                    event_reply_to=form.cleaned_data.get('reply_to') or self._get_reply_to_for_bulk_email() or None,
+                    attach_cached_files=(
+                        [form.cleaned_data['attachment'].id] if form.cleaned_data.get('attachment') else None
+                    ),
+                    user=request.user,
+                    auto_email=False,
+                    sync_send=True,
+                )
+            except SendMailException as error:
+                logger.exception('Could not send test email for event %s', event.slug)
+                return JsonResponse({'sent': False, 'error': str(error)}, status=502)
+
+        return JsonResponse({
+            'sent': True,
+            'message': str(_('Test email sent to {email}.').format(email=address)),
+        })
 
 
 class MailTemplatesView(EventSettingsViewMixin, EventSettingsFormView):
@@ -319,6 +505,10 @@ class SendEmailQueueView(EventPermissionRequiredMixin, View):
         if mail.sent_at:
             messages.warning(request, _('This mail has already been sent.'))
         else:
+            # Sending a draft is the explicit release the draft flag waits for.
+            if mail.is_draft:
+                mail.is_draft = False
+                mail.save(update_fields=['is_draft'])
             # Enqueue the Celery task
             send_queued_mail.apply_async(args=[request.event.pk, mail.pk])
             messages.success(

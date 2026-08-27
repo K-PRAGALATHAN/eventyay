@@ -13,6 +13,8 @@ urlpatterns = [
     path('outbox/delete/<int:pk>/', views.DeleteEmailQueueView.as_view(), name='event.mail.outbox.delete'),
     path('outbox/purge/', views.PurgeEmailQueuesView.as_view(), name='event.mail.outbox.purge'),
     path('sendmail/', views.SenderView.as_view(), name='event.mail.send'),
+    path('sendmail/recipients/', views.RecipientListView.as_view(), name='event.mail.send.recipients'),
+    path('sendmail/test/', views.TestEmailView.as_view(), name='event.mail.send.test'),
     path('sendmail/sent/', views.SentMailView.as_view(), name='event.mail.sent'),
     path('sendmail/templates/', views.MailTemplatesView.as_view(), name='event.mail.templates'),
 ]

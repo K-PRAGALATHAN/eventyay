@@ -1,15 +1,83 @@
 import logging
 import dateutil.parser
 
-from django.db.models import Q
+from django.db.models import Exists, OuterRef, Q
+from django.utils.timezone import now
 
 from eventyay.base.models import CachedFile
 from eventyay.base.models.event import SubEvent
+from eventyay.base.models.orders import Order, OrderPosition
+from eventyay.helpers.timezone import (
+    attach_timezone_to_naive_clock_time,
+    get_browser_timezone,
+)
 
 from .models import EmailQueue, EmailQueueFilter
 
 
 logger = logging.getLogger(__name__)
+
+
+class AudienceFilterMixin:
+    """Resolves the orders matched by the composer's audience filters.
+
+    This is the single source of truth for recipient selection: the live
+    recipient count, the recipient preview and the actual send all go through
+    it, so they can never disagree about who receives an email.
+    """
+
+    def get_matching_orders(self, cleaned_data):
+        qs = Order.objects.filter(event=self.request.event)
+        statusq = Q(status__in=cleaned_data['order_status'])
+        if 'overdue' in cleaned_data['order_status']:
+            statusq |= Q(status=Order.STATUS_PENDING, expires__lt=now())
+        if 'pa' in cleaned_data['order_status']:
+            statusq |= Q(status=Order.STATUS_PENDING, require_approval=True)
+        if 'na' in cleaned_data['order_status']:
+            statusq |= Q(status=Order.STATUS_PENDING, require_approval=False)
+        orders = qs.filter(statusq)
+
+        opq = OrderPosition.objects.filter(
+            order=OuterRef('pk'),
+            canceled=False,
+            product_id__in=[p.pk for p in cleaned_data.get('products')],
+        )
+
+        if cleaned_data.get('has_filter_checkins'):
+            ql = []
+            if cleaned_data.get('not_checked_in'):
+                ql.append(Q(checkins__list_id=None))
+            if cleaned_data.get('checkin_lists'):
+                ql.append(
+                    Q(
+                        checkins__list_id__in=[i.pk for i in cleaned_data.get('checkin_lists', [])],
+                    )
+                )
+            if len(ql) == 2:
+                opq = opq.filter(ql[0] | ql[1])
+            elif ql:
+                opq = opq.filter(ql[0])
+            else:
+                opq = opq.none()
+
+        if cleaned_data.get('subevent'):
+            opq = opq.filter(subevent=cleaned_data.get('subevent'))
+        if cleaned_data.get('subevents_from'):
+            opq = opq.filter(subevent__date_from__gte=cleaned_data.get('subevents_from'))
+        if cleaned_data.get('subevents_to'):
+            opq = opq.filter(subevent__date_from__lt=cleaned_data.get('subevents_to'))
+        if cleaned_data.get('order_created_from') or cleaned_data.get('order_created_to'):
+            browser_tz = get_browser_timezone(cleaned_data.get('browser_timezone'))
+
+            def attach_timezone(dt_value):
+                return attach_timezone_to_naive_clock_time(dt_value, browser_tz)
+
+            if cleaned_data.get('order_created_from'):
+                opq = opq.filter(order__datetime__gte=attach_timezone(cleaned_data['order_created_from']))
+            if cleaned_data.get('order_created_to'):
+                opq = opq.filter(order__datetime__lt=attach_timezone(cleaned_data['order_created_to']))
+
+        return orders.annotate(match_pos=Exists(opq)).filter(match_pos=True).distinct()
 
 
 class CopyDraftMixin:

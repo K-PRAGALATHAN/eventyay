@@ -7,100 +7,159 @@
     <nav id="event-nav" class="header-nav">
         <div class="navigation">
             <div class="navigation-title nav-title-group">
-                <h1>{% translate "Email editor" %}</h1>
+                <h1>{% translate "Compose email" %}</h1>
                 <p class='text-muted nav-subtitle'>{% translate "Attendees, orders, tickets" %}</p>
             </div>
             {% include "pretixcontrol/event/component_link.html" %}
         </div>
     </nav>
     {% block inner %}
-        <form class="form-horizontal" method="post" action="" enctype="multipart/form-data">
+        <p class="text-muted">
+            {% translate "Send an email to attendees, orders, ticket buyers, based on their order status and other filters." %}
+        </p>
+        <form class="sendmail-composer" method="post" action="" enctype="multipart/form-data"
+              data-composer
+              data-test-url="{% url 'control:event.mail.send.test' organizer=request.event.organizer.slug event=request.event.slug %}">
             {% csrf_token %}
+            {% bootstrap_form_errors form %}
 
-            <div class="tabbed-form">
-                <!-- Recipients Section -->
-                <fieldset>
-                    <legend>{% translate "Recipients" %}</legend>
-                    {% bootstrap_form_errors form %}
-                    {% bootstrap_field form.recipients layout='horizontal' %}
-                    {% bootstrap_field form.order_status layout='horizontal' %}
-                    {% if form.subevent %}
-                        {% bootstrap_field form.subevent layout='horizontal' %}
-                        {% bootstrap_field form.subevents_from layout='horizontal' %}
-                        {% bootstrap_field form.subevents_to layout='horizontal' %}
-                    {% endif %}
-                    {% bootstrap_field form.order_created_from layout='horizontal' %}
-                    {% bootstrap_field form.order_created_to layout='horizontal' %}
-                    {{ form.browser_timezone }}
-                    {% bootstrap_field form.products layout='horizontal' %}
+            <!-- Audience -->
+            <fieldset data-audience-filters
+                      data-recipient-url="{% url 'control:event.mail.send.recipients' organizer=request.event.organizer.slug event=request.event.slug %}">
+                <legend class="clearfix">
+                    {% translate "Audience" %}
+                    <small class="pull-right text-muted">
+                        <span data-recipient-count>&ndash;</span> {% translate "recipients" %}
+                    </small>
+                </legend>
+
+                <div class="row">
+                    <div class="col-md-4">{% bootstrap_field form.recipients %}</div>
+                    <div class="col-md-4">{% bootstrap_field form.order_status %}</div>
+                    <div class="col-md-4">{% bootstrap_field form.products %}</div>
+                </div>
+
+                <div class="row">
+                    <div class="col-md-4">{% bootstrap_field form.order_created_from %}</div>
+                    <div class="col-md-4">{% bootstrap_field form.order_created_to %}</div>
+                    <div class="col-md-4">
+                        {% bootstrap_field form.has_filter_checkins %}
+                        {% bootstrap_field form.not_checked_in %}
+                        {% bootstrap_field form.checkin_lists %}
+                    </div>
+                </div>
+
+                {% if form.subevent %}
                     <div class="row">
-                        <div class="col-md-9 col-md-offset-3">
-                            <div class="panel-group">
-                                <div class="panel panel-default">
-                                    <div class="panel-heading">
-                                        <label data-toggle="collapse" data-target="#checkin_filter">
-                                            {{ form.has_filter_checkins }} {{ form.has_filter_checkins.label }}
-                                        </label>
-                                    </div>
-                                    <div id="checkin_filter" class="panel-body panel-collapse collapse {% if form.has_filter_checkins.value %} in {% else %} out {% endif %}">
-                                        {% bootstrap_field form.not_checked_in layout='horizontal' %}
-                                        {% bootstrap_field form.checkin_lists layout='horizontal' %}
-                                    </div>
-                                </div>
+                        <div class="col-md-4">{% bootstrap_field form.subevent %}</div>
+                        <div class="col-md-4">{% bootstrap_field form.subevents_from %}</div>
+                        <div class="col-md-4">{% bootstrap_field form.subevents_to %}</div>
+                    </div>
+                {% endif %}
+
+                {{ form.browser_timezone }}
+
+                <div class="row">
+                    <div class="col-md-12">
+                        <p data-filter-chips-row>
+                            <span class="text-muted">{% translate "Selected filters:" %}</span>
+                            <span data-filter-chips></span>
+                        </p>
+                        <button type="button" class="btn btn-default btn-sm" data-recipient-preview-open>
+                            <i class="fa fa-users fa-fw"></i> {% translate "Show recipient list" %}
+                        </button>
+                        <button type="button" class="btn btn-link btn-sm" data-clear-filters>
+                            {% translate "Clear filters" %}
+                        </button>
+                    </div>
+                </div>
+            </fieldset>
+
+            <!-- Reply-To / BCC -->
+            <fieldset>
+                <legend>{% translate "Reply-To and BCC" %}</legend>
+                <div class="row">
+                    <div class="col-md-6">{% bootstrap_field form.reply_to %}</div>
+                    <div class="col-md-6">{% bootstrap_field form.bcc %}</div>
+                </div>
+            </fieldset>
+
+            <!-- Message -->
+            <fieldset>
+                <legend class="clearfix">
+                    {% translate "Message" %}
+                    <button type="button" class="btn btn-default btn-sm pull-right" data-placeholder-open>
+                        <i class="fa fa-code fa-fw"></i> {% translate "Insert placeholder" %}
+                    </button>
+                </legend>
+                {% bootstrap_field form.subject %}
+                <div class="form-group"
+                     data-email-preview-wrapper
+                     data-email-preview-url="{% url 'control:event.editor.email.preview' organizer=request.event.organizer.slug event=request.event.slug %}">
+                    <label for="{{ form.message.id_for_label }}">{{ form.message.label }}</label>
+                    <ul class="nav nav-tabs" role="tablist">
+                        <li role="presentation" class="active">
+                            <a data-toggle="tab" href="#compose_message_edit">
+                                <i class="fa fa-pencil-square-o fa-fw"></i> {% translate "Edit" %}
+                            </a>
+                        </li>
+                        <li role="presentation">
+                            <a data-toggle="tab" href="#compose_message_preview" data-email-preview-tab>
+                                <i class="fa fa-tv fa-fw"></i> {% translate "Preview" %}
+                            </a>
+                        </li>
+                    </ul>
+                    <div class="tab-content">
+                        <div id="compose_message_edit" class="tab-pane fade in active">
+                            {% bootstrap_field form.message show_label=False form_group_class="" %}
+                        </div>
+                        <div id="compose_message_preview" class="tab-pane">
+                            <div class="mail-preview-group">
+                                {% for locale in request.event.settings.locales %}
+                                    <div lang="{{ locale }}" class="mail-preview well"></div>
+                                {% endfor %}
                             </div>
                         </div>
                     </div>
-                </fieldset>
-                
-                <!-- Content Section -->
-                <fieldset>
-                    <legend>{% translate "Content" %}</legend>
-                    {% bootstrap_form_errors form %}
-                    {% bootstrap_field form.subject layout='horizontal' %}
-                    <div class="form-group"
-                         data-email-preview-wrapper
-                         data-email-preview-url="{% url 'control:event.editor.email.preview' organizer=request.event.organizer.slug event=request.event.slug %}">
-                        <label class="col-md-3 control-label" for="{{ form.message.id_for_label }}">{{ form.message.label }}</label>
-                        <div class="col-md-9">
-                            <ul class="nav nav-tabs" role="tablist">
-                                <li role="presentation" class="active">
-                                    <a data-toggle="tab" href="#compose_message_edit">
-                                        <i class="fa fa-pencil-square-o fa-fw"></i> {% translate "Edit" %}
-                                    </a>
-                                </li>
-                                <li role="presentation">
-                                    <a data-toggle="tab" href="#compose_message_preview" data-email-preview-tab>
-                                        <i class="fa fa-tv fa-fw"></i> {% translate "Preview" %}
-                                    </a>
-                                </li>
-                            </ul>
-                            <div class="tab-content">
-                                <div id="compose_message_edit" class="tab-pane fade in active">
-                                    {% bootstrap_field form.message show_label=False form_group_class="" %}
-                                </div>
-                                <div id="compose_message_preview" class="tab-pane">
-                                    <div class="mail-preview-group">
-                                        {% for locale in request.event.settings.locales %}
-                                            <div lang="{{ locale }}" class="mail-preview well"></div>
-                                        {% endfor %}
-                                    </div>
-                                </div>
-                            </div>
+                </div>
+            </fieldset>
+
+            <!-- Attachment -->
+            <fieldset>
+                <legend>{% translate "Attachment" %}</legend>
+                {% bootstrap_field form.attachment %}
+            </fieldset>
+
+            <!-- Delivery -->
+            <fieldset data-delivery>
+                <legend>{% translate "Delivery" %}</legend>
+                {% bootstrap_field form.delivery %}
+                <div data-schedule-fields>
+                    {% bootstrap_field form.scheduled_at %}
+                </div>
+                <div class="form-group">
+                    <label for="sendmail-test-email">{% translate "Send test email" %}</label>
+                    <div class="row">
+                        <div class="col-md-6">
+                            <input type="email" class="form-control" id="sendmail-test-email"
+                                   data-test-email placeholder="{% translate "you@example.org" %}">
+                        </div>
+                        <div class="col-md-6">
+                            <button type="button" class="btn btn-default" data-test-send>
+                                <i class="fa fa-paper-plane fa-fw"></i> {% translate "Send test email" %}
+                            </button>
                         </div>
                     </div>
-                    {% bootstrap_field form.attachment layout='horizontal' %}
-                </fieldset>
+                    <p class="help-block">
+                        {% translate "Sends this email to one address using sample order data. Test emails are not added to the recipient list." %}
+                    </p>
+                    <p data-test-result aria-live="polite"></p>
+                </div>
+            </fieldset>
 
-                <!-- Scheduling Section -->
+            {% if request.method == "POST" and output %}
                 <fieldset>
-                    <legend>{% translate "Scheduling" %}</legend>
-                    {% bootstrap_field form.scheduled_at layout='horizontal' %}
-                </fieldset>
-            </div>
-
-            {% if request.method == "POST" %}
-                <fieldset>
-                <legend>{% translate "E-mail preview" %}</legend>
+                    <legend>{% translate "Email preview" %}</legend>
                     <div class="tab-pane mail-preview-group">
                         {% for locale, out in output.items %}
                             <div lang="{{ locale }}" class="mail-preview">
@@ -111,19 +170,160 @@
                     </div>
                 </fieldset>
             {% endif %}
-            
+
             <div class="form-group submit-group">
-                <button type="submit" class="btn btn-default btn-save" name="action" value="preview">
-                    {% translate "Preview email" %}
-                </button>
-                <button type="submit" class="btn btn-primary btn-save">
-                    {% translate "Send to outbox" %}
-                </button>
+                <span class="text-muted">
+                    <span data-recipient-count>&ndash;</span> {% translate "recipients selected" %}
+                </span>
+                <span class="pull-right">
+                    <button type="submit" class="btn btn-default btn-save" name="action" value="draft">
+                        {% translate "Save draft" %}
+                    </button>
+                    <button type="submit" class="btn btn-default btn-save" name="action" value="preview">
+                        {% translate "Preview email" %}
+                    </button>
+                    <button type="submit" class="btn btn-primary btn-save" name="action" value="send"
+                            data-send-button
+                            data-label-send="{% translate "Send to outbox" %}"
+                            data-label-schedule="{% translate "Schedule email" %}">
+                        {% translate "Send to outbox" %}
+                    </button>
+                </span>
             </div>
         </form>
+
+        <!-- Recipient preview -->
+        <div class="modal fade" id="recipient-preview-modal" tabindex="-1" role="dialog"
+             aria-labelledby="recipient-preview-title">
+            <div class="modal-dialog modal-lg" role="document">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <button type="button" class="close" data-dismiss="modal" aria-label="{% translate "Close" %}">
+                            <span aria-hidden="true">&times;</span>
+                        </button>
+                        <h4 class="modal-title" id="recipient-preview-title">{% translate "Recipient list" %}</h4>
+                    </div>
+                    <div class="modal-body">
+                        <p class="text-muted" data-recipient-preview-summary
+                           data-label-all="{% translate "Showing all {count} recipients." %}"
+                           data-label-truncated="{% translate "Showing the first {shown} of {count} recipients." %}"></p>
+                        <div class="table-responsive">
+                            <table class="table table-condensed table-hover">
+                                <thead>
+                                    <tr>
+                                        <th>{% translate "Name" %}</th>
+                                        <th>{% translate "Email" %}</th>
+                                        <th>{% translate "Type" %}</th>
+                                        <th>{% translate "Order" %}</th>
+                                        <th>{% translate "Status" %}</th>
+                                        <th>{% translate "Product" %}</th>
+                                        <th>{% translate "Check-in" %}</th>
+                                        <th>{% translate "Reason included" %}</th>
+                                    </tr>
+                                </thead>
+                                <tbody data-recipient-preview-body
+                                       data-empty-label="{% translate "No recipients match the current filters." %}"></tbody>
+                            </table>
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-default" data-dismiss="modal">{% translate "Close" %}</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Insert placeholder -->
+        <div class="modal fade" id="placeholder-modal" tabindex="-1" role="dialog" aria-labelledby="placeholder-title">
+            <div class="modal-dialog" role="document">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <button type="button" class="close" data-dismiss="modal" aria-label="{% translate "Close" %}">
+                            <span aria-hidden="true">&times;</span>
+                        </button>
+                        <h4 class="modal-title" id="placeholder-title">{% translate "Insert placeholder" %}</h4>
+                    </div>
+                    <div class="modal-body">
+                        <input type="search" class="form-control" data-placeholder-search
+                               placeholder="{% translate "Search placeholders" %}"
+                               aria-label="{% translate "Search placeholders" %}">
+                        <p class="help-block">
+                            {% translate "The placeholder is inserted where you last typed, in the subject or the message." %}
+                        </p>
+                        {% for group in placeholder_groups %}
+                            <div data-placeholder-group>
+                                <h5>{{ group.label }}</h5>
+                                <ul class="list-unstyled">
+                                    {% for item in group.items %}
+                                        <li data-placeholder-item data-token="{{ item.token }}"
+                                            data-search="{{ item.name }} {{ item.sample }}">
+                                            <button type="button" class="btn btn-link btn-sm" data-placeholder-insert>
+                                                <code>{{ item.token }}</code>
+                                            </button>
+                                            {% if item.sample %}
+                                                <span class="text-muted small">{{ item.sample }}</span>
+                                            {% endif %}
+                                        </li>
+                                    {% endfor %}
+                                </ul>
+                            </div>
+                        {% endfor %}
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-default" data-dismiss="modal">{% translate "Close" %}</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Send confirmation -->
+        <div class="modal fade" id="send-confirm-modal" tabindex="-1" role="dialog" aria-labelledby="send-confirm-title">
+            <div class="modal-dialog" role="document">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <button type="button" class="close" data-dismiss="modal" aria-label="{% translate "Close" %}">
+                            <span aria-hidden="true">&times;</span>
+                        </button>
+                        <h4 class="modal-title" id="send-confirm-title" data-confirm-title
+                            data-label-send="{% translate "Send to outbox?" %}"
+                            data-label-schedule="{% translate "Schedule email?" %}">
+                            {% translate "Send to outbox?" %}
+                        </h4>
+                    </div>
+                    <div class="modal-body">
+                        <dl class="dl-horizontal">
+                            <dt>{% translate "Audience" %}</dt>
+                            <dd><span data-confirm-count>&ndash;</span> {% translate "recipients" %}</dd>
+                            <dt>{% translate "Type" %}</dt>
+                            <dd>{% translate "Attendees, orders, tickets" %}</dd>
+                            <dt>{% translate "Subject" %}</dt>
+                            <dd data-confirm-subject></dd>
+                            <dt>{% translate "Delivery" %}</dt>
+                            <dd data-confirm-delivery></dd>
+                            <dt>{% translate "Attachment" %}</dt>
+                            <dd data-confirm-attachment
+                                data-label-none="{% translate "None" %}"
+                                data-label-one="{% translate "1 file" %}"></dd>
+                        </dl>
+                        <p class="text-danger" data-confirm-warning hidden>
+                            {% translate "The audience filters changed after the last preview. Please check the recipient list again." %}
+                        </p>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-default" data-dismiss="modal">{% translate "Cancel" %}</button>
+                        <button type="button" class="btn btn-primary" data-confirm-send
+                                data-label-send="{% translate "Send to outbox" %}"
+                                data-label-schedule="{% translate "Schedule email" %}">
+                            {% translate "Send to outbox" %}
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
     {% endblock %}
 {% endblock %}
 {% block custom_header %}
     {{ block.super }}
     <script type="module" src="{% static 'common/js/timezone.js' %}" defer></script>
+    <script type="module" src="{% static 'pretixplugins/sendmail/composer.js' %}"></script>
 {% endblock %}

@@ -30,6 +30,71 @@ class Recipients(models.TextChoices):
     BOTH = 'both', 'Both'
 
 
+class RecipientRole:
+    """Why an address ended up in the recipient list."""
+
+    ATTENDEE = 'attendee'
+    ATTENDEE_FALLBACK = 'attendee_fallback'
+    BUYER = 'buyer'
+
+
+def resolve_recipients(orders_qs, recipients_mode):
+    """Map the orders of a mailing to the addresses it will reach.
+
+    Returns ``{email: {"orders", "positions", "products", "roles"}}``. Shared by
+    :meth:`EmailQueue.populate_to_users` and the composer's recipient count and
+    preview, so what an organiser is shown can never drift from what is sent.
+    """
+    recipients = defaultdict(lambda: {
+        "orders": set(),
+        "positions": set(),
+        "products": set(),
+        "roles": set(),
+    })
+
+    for order in orders_qs:
+        order_fallback_needed = False
+        attendee_found = False
+
+        for pos in order.positions.all():
+            if pos.attendee_email:
+                attendee_found = True
+                email = pos.attendee_email.strip().lower()
+                recipients[email]["orders"].add(order.pk)
+                recipients[email]["positions"].add(pos.pk)
+                recipients[email]["products"].add(pos.product.pk)
+                recipients[email]["roles"].add(RecipientRole.ATTENDEE)
+            else:
+                # No attendee email; maybe fallback later
+                order_fallback_needed = True
+
+        # Fallback to order email if needed
+        if (
+            order_fallback_needed and
+            not attendee_found and
+            recipients_mode == "attendees" and
+            order.email
+        ):
+            email = order.email.strip().lower()
+            recipients[email]["orders"].add(order.pk)
+            recipients[email]["roles"].add(RecipientRole.ATTENDEE_FALLBACK)
+            for pos in order.positions.all():
+                recipients[email]["positions"].add(pos.pk)
+                recipients[email]["products"].add(pos.product_id)
+
+        # Explicit inclusion of orders (include positions so QR/attendee
+        # placeholders can resolve for buyer/order contact emails).
+        if recipients_mode in ("both", "orders") and order.email:
+            email = order.email.strip().lower()
+            recipients[email]["orders"].add(order.pk)
+            recipients[email]["roles"].add(RecipientRole.BUYER)
+            for pos in order.positions.all():
+                recipients[email]["positions"].add(pos.pk)
+                recipients[email]["products"].add(pos.product_id)
+
+    return recipients
+
+
 
 class EmailQueue(models.Model):
     """
@@ -70,6 +135,9 @@ class EmailQueue(models.Model):
 
     :param sent_at: When the email was sent (fully completed).
     :type sent_at: datetime.datetime or None
+
+    :param is_draft: Whether this is a draft that must never be sent on its own.
+    :type is_draft: bool
     """
     event = models.ForeignKey(Event, on_delete=models.CASCADE, related_name="email_queue")
     user = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL)
@@ -86,6 +154,10 @@ class EmailQueue(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     sent_at = models.DateTimeField(null=True, blank=True)
+    is_draft = models.BooleanField(
+        default=False,
+        help_text=_('Drafts stay in the outbox untouched until they are explicitly sent.'),
+    )
     scheduled_at = models.DateTimeField(
         null=True,
         blank=True,
@@ -120,6 +192,9 @@ class EmailQueue(models.Model):
         """
         if self.sent_at:
             return False  # Already sent
+
+        if self.is_draft:
+            return False  # Drafts are only sent once explicitly released
 
         if self.scheduled_at and self.scheduled_at > now():
             raise SendMailException(_('This email is scheduled for the future and cannot be sent yet.'))
@@ -252,54 +327,12 @@ class EmailQueue(models.Model):
         if not filters:
             return
 
-        recipients_mode = filters.recipients or "orders"
         orders_qs = Order.objects.filter(
             pk__in=filters.orders,
             event=self.event
         ).prefetch_related('positions__product', 'positions__addons', 'positions__checkins')
 
-        recipients = defaultdict(lambda: {
-            "orders": set(),
-            "positions": set(),
-            "products": set()
-        })
-
-        for order in orders_qs:
-            order_fallback_needed = False
-            attendee_found = False
-
-            for pos in order.positions.all():
-                if pos.attendee_email:
-                    attendee_found = True
-                    email = pos.attendee_email.strip().lower()
-                    recipients[email]["orders"].add(order.pk)
-                    recipients[email]["positions"].add(pos.pk)
-                    recipients[email]["products"].add(pos.product.pk)
-                else:
-                    # No attendee email; maybe fallback later
-                    order_fallback_needed = True
-
-            # Fallback to order email if needed
-            if (
-                order_fallback_needed and
-                not attendee_found and
-                recipients_mode == "attendees" and
-                order.email
-            ):
-                email = order.email.strip().lower()
-                recipients[email]["orders"].add(order.pk)
-                for pos in order.positions.all():
-                    recipients[email]["positions"].add(pos.pk)
-                    recipients[email]["products"].add(pos.product_id)
-
-            # Explicit inclusion of orders (include positions so QR/attendee
-            # placeholders can resolve for buyer/order contact emails).
-            if recipients_mode in ("both", "orders") and order.email:
-                email = order.email.strip().lower()
-                recipients[email]["orders"].add(order.pk)
-                for pos in order.positions.all():
-                    recipients[email]["positions"].add(pos.pk)
-                    recipients[email]["products"].add(pos.product_id)
+        recipients = resolve_recipients(orders_qs, filters.recipients or "orders")
 
         # Clear and insert fresh records
         self.recipients.all().delete()

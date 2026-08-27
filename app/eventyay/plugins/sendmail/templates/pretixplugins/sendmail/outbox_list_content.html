@@ -100,7 +100,9 @@
           </td>
           <td class="list-meta">{{ mail.recipient_emails_display|split:','|length }}</td>
           <td class="list-meta">
-            {% if mail.scheduled_at %}
+            {% if mail.is_draft %}
+              <span class='label label-warning'>{% translate 'Draft' %}</span>
+            {% elif mail.scheduled_at %}
               <span class='label label-info'>
                 {% translate 'Scheduled for' %} {{ mail.scheduled_at|timezone:request.event.timezone|date:"Y-m-d H:i" }}
               </span>

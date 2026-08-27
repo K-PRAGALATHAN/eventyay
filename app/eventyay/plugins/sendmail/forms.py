@@ -1,6 +1,7 @@
 from django import forms
 from django.conf import settings
 from django.core.exceptions import ValidationError
+from django.core.validators import validate_email
 from django.urls import reverse
 from django.utils.translation import gettext_lazy as _
 from django.utils.translation import pgettext_lazy
@@ -34,11 +35,35 @@ def contains_web_channel_validate(value):
     if 'web' not in value:
         raise ValidationError(_("The 'web' sales channel must be selected."))
 
+DELIVERY_NOW = 'now'
+DELIVERY_LATER = 'later'
+
+
 class MailForm(ScheduledAtValidationMixin, forms.Form):
     recipients = forms.ChoiceField(label=_('Send email to'), widget=forms.RadioSelect, initial='orders', choices=[])
+    delivery = forms.ChoiceField(
+        label=_('When to send'),
+        widget=forms.RadioSelect,
+        initial=DELIVERY_NOW,
+        choices=[
+            (DELIVERY_NOW, _('Send now')),
+            (DELIVERY_LATER, _('Schedule for later')),
+        ],
+    )
     order_status = forms.MultipleChoiceField()  # overridden later
     subject = forms.CharField(label=_('Subject'))
     message = forms.CharField(label=_('Message'))
+    reply_to = forms.EmailField(
+        label=_('Reply-To'),
+        required=False,
+        help_text=_('Replies to the email will be sent here. If left empty, the event default Reply-To address is used.'),
+    )
+    bcc = forms.CharField(
+        label=_('BCC'),
+        required=False,
+        widget=forms.Textarea(attrs={'rows': 1, 'class': 'form-control'}),
+        help_text=_('These addresses receive a blind copy of every email. Separate multiple addresses with commas.'),
+    )
     attachment = CachedFileField(
         label=_('Attachment'),
         required=False,
@@ -110,9 +135,8 @@ class MailForm(ScheduledAtValidationMixin, forms.Form):
     )
     scheduled_at = SplitDateTimeField(
         widget=SplitDateTimePickerWidget(),
-        label=_('Send later'),
+        label=_('Send at'),
         required=False,
-        help_text=_('Leave empty to send immediately. If set, the email will be sent at this time. Time is interpreted in the event timezone.'),
     )
     browser_timezone = forms.CharField(
         widget=forms.HiddenInput(attrs={'class': 'browser-timezone-field'}),
@@ -122,6 +146,15 @@ class MailForm(ScheduledAtValidationMixin, forms.Form):
 
     def clean(self):
         d = super().clean()
+        # "Send now" wins over any date left behind in the scheduling fields.
+        if d.get('delivery') == DELIVERY_LATER:
+            if not d.get('scheduled_at') and 'scheduled_at' not in self.errors:
+                self.add_error(
+                    'scheduled_at',
+                    _('Please pick when the email should be sent, or choose “Send now”.'),
+                )
+        elif d.get('delivery') == DELIVERY_NOW:
+            d['scheduled_at'] = None
         if d.get('subevent') and (d.get('subevents_from') or d.get('subevents_to')):
             raise ValidationError(
                 pgettext_lazy(
@@ -138,18 +171,38 @@ class MailForm(ScheduledAtValidationMixin, forms.Form):
             )
         return d
 
+    def clean_bcc(self):
+        raw = self.cleaned_data.get('bcc', '') or ''
+        emails = [e.strip() for e in raw.split(',') if e.strip()]
+        for email in emails:
+            try:
+                validate_email(email)
+            except ValidationError:
+                raise ValidationError(
+                    _('“{email}” is not a valid email address.').format(email=email)
+                )
+        return ', '.join(emails)
+
     def _set_field_placeholders(self, fn, base_parameters):
+        """Validate placeholders without printing them into the help text.
+
+        The composer offers them through the “Insert placeholder” drawer, so the
+        long inline list this used to append is redundant noise.
+        """
         phs = ['{%s}' % p for p in sorted(get_available_placeholders(self.event, base_parameters).keys())]
-        ht = _('Available placeholders: {list}').format(list=', '.join(phs))
-        if self.fields[fn].help_text:
-            self.fields[fn].help_text += ' ' + str(ht)
-        else:
-            self.fields[fn].help_text = ht
         self.fields[fn].validators.append(PlaceholderValidator(phs))
 
     def __init__(self, *args, **kwargs):
         event = self.event = kwargs.pop('event')
         super().__init__(*args, **kwargs)
+
+        # Spell the timezone out instead of leaving organisers to guess it, and
+        # drop the widget's sample date so it cannot be mistaken for a default.
+        self.fields['scheduled_at'].help_text = _('Times are in the event timezone ({timezone}).').format(
+            timezone=event.timezone
+        )
+        for widget in getattr(self.fields['scheduled_at'].widget, 'widgets', []):
+            widget.attrs.pop('placeholder', None)
 
         recp_choices = [('orders', _('Everyone who created a ticket order'))]
         if event.settings.attendee_emails_asked:
@@ -239,6 +292,31 @@ class MailForm(ScheduledAtValidationMixin, forms.Form):
             del self.fields['subevent']
             del self.fields['subevents_from']
             del self.fields['subevents_to']
+
+
+class RecipientQueryForm(MailForm):
+    """``MailForm`` reduced to its audience filters.
+
+    The live recipient count and the recipient preview run while the email is
+    still being written, so everything that is not a filter is optional here.
+    """
+
+    OPTIONAL_FIELDS = (
+        'subject', 'message', 'attachment', 'reply_to', 'bcc', 'scheduled_at', 'delivery',
+    )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        for name in self.OPTIONAL_FIELDS:
+            field = self.fields.get(name)
+            if field is None:
+                continue
+            field.required = False
+            # I18nFormField keeps its own flags instead of honouring ``required``.
+            if hasattr(field, 'one_required'):
+                field.one_required = False
+            if hasattr(field, 'require_all_fields'):
+                field.require_all_fields = False
 
 
 class MailContentSettingsForm(SettingsForm):
