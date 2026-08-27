@@ -372,12 +372,20 @@ class TestEmailView(EventPermissionRequiredMixin, BulkReplyToMixin, View):
 
         form = forms.MailForm(data=request.POST, event=request.event)
         if not form.is_valid():
+            # Name the fields that are actually in the way: a test send fails on
+            # an empty audience just as often as on an empty subject.
+            labels = [
+                str(form.fields[name].label or name)
+                for name in form.errors
+                if name in form.fields
+            ]
+            error = (
+                _('Please complete these fields first: {fields}.').format(fields=', '.join(labels))
+                if labels
+                else _('Please correct the errors in the form first.')
+            )
             return JsonResponse(
-                {
-                    'sent': False,
-                    'error': str(_('Please fill in the subject and message first.')),
-                    'errors': form.errors.get_json_data(),
-                },
+                {'sent': False, 'error': str(error), 'errors': form.errors.get_json_data()},
                 status=400,
             )
 
