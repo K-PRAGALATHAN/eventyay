@@ -9,6 +9,10 @@ let debounceTimer = null
 let previewedSignature = null
 let confirmed = false
 let lastEditedField = null
+// Responses can arrive out of order, so every lookup carries a generation and a
+// late answer for filters the organiser has already moved on from is dropped.
+let countGeneration = 0
+let previewGeneration = 0
 
 /* ------------------------------------------------------------------ helpers */
 
@@ -107,10 +111,17 @@ async function refreshCount() {
   if (!countTargets.length) {
     return
   }
+  const generation = ++countGeneration
   try {
     const result = await queryRecipients(false)
+    if (generation !== countGeneration) {
+      return
+    }
     setCount(result.valid ? result.count : emptyCount)
   } catch (error) {
+    if (generation !== countGeneration) {
+      return
+    }
     console.error('Could not refresh the recipient count.', error)
     setCount(emptyCount)
   }
@@ -255,15 +266,24 @@ function renderSummary(result) {
 async function openPreview() {
   const modal = document.querySelector('#recipient-preview-modal')
   showModal(modal)
+  const generation = ++previewGeneration
   try {
     const result = await queryRecipients(true)
+    if (generation !== previewGeneration) {
+      return
+    }
     renderRows(result)
     renderSummary(result)
     if (result.valid) {
+      // This is fresher than any count still in flight.
+      countGeneration++
       setCount(result.count)
       previewedSignature = filterSignature()
     }
   } catch (error) {
+    if (generation !== previewGeneration) {
+      return
+    }
     console.error('Could not load the recipient list.', error)
     renderRows({ valid: false, recipients: [] })
   }
