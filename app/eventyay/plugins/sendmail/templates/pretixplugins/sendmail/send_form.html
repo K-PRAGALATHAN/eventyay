@@ -324,6 +324,11 @@
 {% endblock %}
 {% block custom_header %}
     {{ block.super }}
+    {# The audience dropdowns are the talk message center's enhanced selects, which
+       formTools.js builds with Choices. formTools runs its setup as soon as the
+       document is parsed, so Choices has to be loaded blocking to beat it. #}
+    <link rel="stylesheet" type="text/css" href="{% static 'vendored/choices/choices.min.css' %}" />
+    <script src="{% static 'vendored/choices/choices.min.js' %}"></script>
     <script type="module" src="{% static 'common/js/timezone.js' %}" defer></script>
     <script type="module" src="{% static 'pretixplugins/sendmail/composer.js' %}"></script>
 {% endblock %}
